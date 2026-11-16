@@ -1,0 +1,21 @@
+# Packages
+node_modules
+
+# Secrets (never upload)
+.env
+.env.local
+.file-key
+
+# Customer files
+uploads
+
+# Build output
+dist
+
+# Logs and system files
+*.log
+.DS_Store
+Thumbs.db
+
+# Database backups (customer data)
+backups
