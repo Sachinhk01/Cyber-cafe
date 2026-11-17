@@ -4,7 +4,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import './styles.css';
 import { AuthProvider, Protected } from './auth.jsx';
 import { Layout, CafeProvider } from './components.jsx';
-import { Login, Overview, Services, ServiceOrder, MyOrders, OrderDetail, PrintPage, Payments, Receipt, Profile } from './pages/Customer.jsx';
+import { Login } from './pages/customer/Login.jsx';
+import { Overview, Services, ServiceOrder, MyOrders, OrderDetail, PrintPage, Payments, Receipt, Profile } from './pages/Customer.jsx';
 import {
   AdminLogin,
   AdminDashboard,

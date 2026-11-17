@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, uploadForm, downloadFile, viewDoc, saveDoc, rupees, fmtDate, fmtDay, orderRef, printRef } from '../api.js';
 import { useAuth } from '../auth.jsx';
+import { PasswordInput } from '../PasswordInput.jsx';
 import {
   Status,
   ErrorNote,
@@ -97,15 +98,14 @@ export function AdminLogin() {
             </label>
             <label>
               Password
-              <input id="apass" type="password" autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required />
-            </label>
+             <PasswordInput id="apass" autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required />            </label>
             <ErrorNote error={error} />
             <button className="btn primary lg block" disabled={busy}>
               {busy && <span className="spinner" />} Log in
             </button>
           </form>
           <p className="muted small" style={{ textAlign: 'center' }}>
-            Customer? <Link to="/login">Log in with your mobile number</Link>
+            Customer? <Link to="/login">Log in with your username</Link>
           </p>
         </div>
       </section>
@@ -1355,7 +1355,11 @@ export function AdminCustomers() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState('');
-  const shown = data?.customers.filter((c) => `${c.name} ${c.mobile || ''} ${c.email || ''}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const [resetFor, setResetFor] = useState(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetErr, setResetErr] = useState('');
+  const [resetDone, setResetDone] = useState(null);
+  const shown = data?.customers.filter((c) => `${c.name} ${c.username || ''} ${c.mobile || ''} ${c.email || ''}`.toLowerCase().includes(q.trim().toLowerCase()));
 
   async function exportXlsx() {
     setErr('');
@@ -1366,6 +1370,23 @@ export function AdminCustomers() {
       setErr(e.message);
     }
     setBusy(false);
+  }
+
+  function closeReset() {
+    setResetFor(null);
+    setResetDone(null);
+    setResetErr('');
+  }
+
+  async function doReset() {
+    setResetErr('');
+    setResetBusy(true);
+    try {
+      setResetDone(await api(`/admin/customers/${resetFor._id}/reset-password`, { method: 'POST' }));
+    } catch (e) {
+      setResetErr(e.message);
+    }
+    setResetBusy(false);
   }
 
   return (
@@ -1397,7 +1418,7 @@ export function AdminCustomers() {
             <h2>All customers</h2>
             <div className="search">
               <Icon name="search" size={18} />
-              <input id="csearch" placeholder="Search name or mobile" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search customers" />
+              <input id="csearch" placeholder="Search name, username or mobile" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search customers" />
             </div>
           </div>
           <div className="card table-card">
@@ -1406,11 +1427,13 @@ export function AdminCustomers() {
                 <thead>
                   <tr>
                     <th>Name</th>
+                    <th>Username</th>
                     <th>Mobile</th>
                     <th>Email</th>
                     <th>Joined</th>
                     <th className="num">Payments</th>
                     <th className="num">Total spent</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1422,16 +1445,24 @@ export function AdminCustomers() {
                           <strong>{c.name}</strong>
                         </div>
                       </td>
+                      <td>{c.username || <span className="muted">-</span>}</td>
                       <td>{c.mobile || <span className="muted">-</span>}</td>
                       <td className="small">{c.email || <span className="muted">-</span>}</td>
                       <td className="small nowrap">{fmtDay(c.createdAt)}</td>
                       <td className="num">{c.payments}</td>
                       <td className="num strong">{rupees(c.totalSpent)}</td>
+                      <td>
+                        {c.username && !c.deletedAt && (
+                          <button className="btn sm" onClick={() => setResetFor(c)}>
+                            <Icon name="key" size={14} /> Reset password
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {shown.length === 0 && (
                     <tr>
-                      <td colSpan="6">
+                      <td colSpan="8">
                         <Empty icon="users" title={q ? 'No customer matches that search' : 'No customers yet'} />
                       </td>
                     </tr>
@@ -1441,6 +1472,39 @@ export function AdminCustomers() {
             </div>
           </div>
         </>
+      )}
+
+      {resetFor && (
+        <Modal onClose={closeReset} busy={resetBusy} label="Reset password">
+          <span className="tile tint-butter">
+            <Icon name="key" />
+          </span>
+          {!resetDone ? (
+            <>
+              <h2>Reset password for {resetFor.name}?</h2>
+              <p className="muted small">
+                We make a temporary password for <strong>{resetFor.username}</strong> and sign them out on every device. Give it to the customer at the counter or on the phone. They will choose their own password after they log in.
+              </p>
+              <ErrorNote error={resetErr} />
+              <div className="row">
+                <button className="btn primary grow" onClick={doReset} disabled={resetBusy}>
+                  {resetBusy && <span className="spinner" />} Make temporary password
+                </button>
+                <button className="btn" onClick={closeReset} disabled={resetBusy}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <h2>Temporary password ready</h2>
+              <p className="muted small">Username: <strong>{resetDone.username}</strong></p>
+              <p className="dev-note" style={{ fontSize: '1.3rem', letterSpacing: 1, textAlign: 'center' }}>
+                <strong>{resetDone.tempPassword}</strong>
+              </p>
+              <p className="muted small">This is shown only once. Close this window and it is gone, so tell the customer now.</p>
+              <button className="btn primary block" onClick={closeReset}>Done</button>
+            </>
+          )}
+        </Modal>
       )}
     </div>
   );
@@ -1466,6 +1530,7 @@ const ACTION_LABEL = {
   'staff.added': ['users', 'Added staff'],
   'staff.removed': ['users', 'Removed staff'],
   'password.changed': ['key', 'Changed password'],
+  'password.reset': ['key', 'Reset a customer password'],
   'login.locked': ['lock', 'Login locked'],
   'backup.downloaded': ['database', 'Downloaded a backup'],
 };

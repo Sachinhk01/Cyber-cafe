@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { api, rupees, viewDoc, saveDoc } from './api.js';
 import { useAuth, isAdmin } from './auth.jsx';
@@ -461,7 +462,7 @@ export function Modal({ onClose, children, wide, label, busy }) {
       document.body.style.overflow = prev;
     };
   }, [onClose, busy]);
-  return (
+  return createPortal(
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose?.()}>
       <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={label}>
         {onClose && (
@@ -471,7 +472,8 @@ export function Modal({ onClose, children, wide, label, busy }) {
         )}
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -704,7 +706,7 @@ function PaidStamp({ amount, onFinish }) {
     const t = setTimeout(onFinish, reducedMotion() ? 600 : 1800);
     return () => clearTimeout(t);
   }, [onFinish]);
-  return (
+  return createPortal(
     <div className="modal-back" role="status" aria-live="polite">
       <div className="stamp-card">
         <div className="stamp">
@@ -713,7 +715,8 @@ function PaidStamp({ amount, onFinish }) {
         <h2 className="serif">Payment received</h2>
         <p className="muted">{rupees(amount)} paid · your receipt is ready</p>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
