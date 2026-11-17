@@ -25,6 +25,8 @@ export const User = model(
   new Schema(
     {
       name: { type: String, required: true, trim: true },
+      // Customers log in with username + password. Mobile is kept for SMS updates and receipts (not verified).
+      username: { type: String, unique: true, sparse: true, trim: true, lowercase: true },
       mobile: { type: String, unique: true, sparse: true, trim: true },
       email: { type: String, lowercase: true, trim: true },
       role: { type: String, enum: ['customer', ...ADMIN_ROLES], default: 'customer' },
@@ -43,20 +45,6 @@ export const User = model(
     },
     ts
   )
-);
-
-export const Otp = model(
-  'Otp',
-  new Schema({
-    mobile: { type: String, required: true, unique: true },
-    codeHash: { type: String, required: true },
-    attempts: { type: Number, default: 0 },
-    sentAt: Date,
-    // D1: per-number hourly cap (works on shared WiFi, unlike an IP limit)
-    hourStart: Date,
-    hourCount: { type: Number, default: 0 },
-    expiresAt: { type: Date, required: true, index: { expires: 0 } },
-  })
 );
 
 export const Service = model(

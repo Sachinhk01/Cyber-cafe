@@ -1,10 +1,8 @@
 import { Router } from 'express';
-import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { User, Otp, Order, PrintJob, Document, Payment, PRIVACY_VERSION } from '../models.js';
+import rateLimit from 'express-rate-limit';
+import { User, Order, PrintJob, Document, Payment, PRIVACY_VERSION } from '../models.js';
 import { ah, auth, signToken, HttpError, checkStrongPassword, DEFAULT_PASSWORDS } from '../lib/auth.js';
-import { sendOtp } from '../lib/notify.js';
 import { removeFile } from '../lib/upload.js';
 import { audit } from '../lib/audit.js';
 
@@ -12,13 +10,14 @@ const r = Router();
 
 const MOBILE_RE = /^[6-9]\d{9}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const hash = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const USERNAME_RE = /^[a-z0-9_.]{4,20}$/;
+const RESERVED_USERNAMES = ['admin', 'owner', 'staff', 'root', 'support', 'cybercafe'];
 const cleanMobile = (m) => String(m || '').replace(/\D/g, '').slice(-10);
-const isProd = () => process.env.NODE_ENV === 'production';
 
 export const publicUser = (u) => ({
   id: u._id,
   name: u.name,
+  username: u.username,
   mobile: u.mobile,
   email: u.email,
   role: u.role,
@@ -26,140 +25,128 @@ export const publicUser = (u) => ({
   createdAt: u.createdAt,
 });
 
-const OTP_PER_HOUR = Number(process.env.OTP_PER_HOUR || 5);
+// Rate limits for the open (not logged-in) routes. The per-account lockout below is the main protection;
+// these are generous because a cafe's shared WiFi is one IP address.
+const limiter = (windowMin, max) =>
+  rateLimit({
+    windowMs: windowMin * 60 * 1000,
+    limit: max,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests. Wait a few minutes and try again.' },
+  });
+const loginLimit = limiter(10, 100);
+const registerLimit = limiter(60, 30);
 
-async function issueOtp(mobile) {
-  const now = Date.now();
-  const last = await Otp.findOne({ mobile }).lean();
-  // One SMS per number every 30 seconds (SMS costs money and this stops abuse)
-  if (last?.sentAt && now - new Date(last.sentAt).getTime() < 30 * 1000) {
-    throw new HttpError(429, 'Please wait 30 seconds before asking for another code.');
-  }
-  // D1: limit per mobile number, not only per IP (a cafe WiFi shares one IP)
-  const inSameHour = last?.hourStart && now - new Date(last.hourStart).getTime() < 3600 * 1000;
-  const hourCount = inSameHour ? (last.hourCount || 0) + 1 : 1;
-  if (hourCount > OTP_PER_HOUR) throw new HttpError(429, 'Too many codes for this number. Try again in an hour.');
-
-  const code = String(crypto.randomInt(100000, 999999));
-  await Otp.findOneAndUpdate(
-    { mobile },
-    {
-      codeHash: hash(code),
-      attempts: 0,
-      sentAt: new Date(now),
-      hourStart: inSameHour ? last.hourStart : new Date(now),
-      hourCount,
-      expiresAt: new Date(now + 5 * 60 * 1000),
-    },
-    { upsert: true }
-  );
-  const sent = await sendOtp(mobile, code);
-  if (!sent && isProd()) throw new HttpError(503, 'We could not send the SMS right now. Please try again in a minute.');
-  // In development the code is returned so you can test without an SMS provider.
-  return isProd() ? {} : { devOtp: code };
+// Customer password rule: kept simple on purpose (4 or more characters, anything goes).
+// Owner and staff use the stricter checkStrongPassword.
+function checkCustomerPassword(pw, username) {
+  const p = String(pw || '');
+  if (p.length < 4) return 'Use at least 4 characters.';
+  if (p.length > 72) return 'Use at most 72 characters.';
+  if (username && p.toLowerCase() === username) return 'Your password must be different from your username.';
+  return null;
 }
 
-// FR-2 + D3 + D4: one flow for everyone. The same answer is given whether or not the number
-// has an account (no "no account with this number"), and an account is only created after
-// the OTP proves the person owns the number.
-r.post(
-  '/send-otp',
-  ah(async (req, res) => {
-    const mobile = cleanMobile(req.body.mobile);
-    if (!MOBILE_RE.test(mobile)) throw new HttpError(400, 'Enter a valid 10-digit mobile number.');
-    res.json({ ok: true, ...(await issueOtp(mobile)) });
-  })
-);
+// D6: shared by customer and admin login. 5 wrong passwords lock the account for 15 minutes.
+// A fake hash is checked when the account does not exist, so the response time does not reveal it.
+const MAX_FAILS = 5;
+const LOCK_MIN = 15;
+const FAKE_HASH = bcrypt.hashSync('not-a-real-password', 10);
 
-r.post(
-  '/verify-otp',
-  ah(async (req, res) => {
-    const mobile = cleanMobile(req.body.mobile);
-    const code = String(req.body.otp || '').trim();
-    const otp = await Otp.findOne({ mobile });
-    if (!otp || otp.expiresAt < new Date()) throw new HttpError(400, 'Code expired. Request a new one.');
-    if (otp.attempts >= 5) throw new HttpError(429, 'Too many wrong attempts. Request a new code.');
-    if (otp.codeHash !== hash(code)) {
-      otp.attempts += 1;
-      await otp.save();
-      throw new HttpError(400, 'Wrong code. Check the SMS and try again.');
+async function checkLogin(req, user, password, who, wrongMessage) {
+  if (user?.lockUntil && user.lockUntil > new Date()) {
+    const mins = Math.ceil((user.lockUntil - Date.now()) / 60000);
+    throw new HttpError(429, `Too many wrong passwords. This login is locked for ${mins} more minute${mins > 1 ? 's' : ''}.`);
+  }
+  const match = await bcrypt.compare(password, user?.passwordHash || FAKE_HASH);
+  if (!user || !user.passwordHash || !match) {
+    if (user) {
+      user.failedLogins = (user.failedLogins || 0) + 1;
+      if (user.failedLogins >= MAX_FAILS) {
+        user.lockUntil = new Date(Date.now() + LOCK_MIN * 60 * 1000);
+        user.failedLogins = 0;
+        await audit({ user: { id: user._id, name: user.name, role: user.role }, ip: req.ip }, 'login.locked', {
+          targetType: 'user',
+          targetId: user._id,
+          summary: `${MAX_FAILS} wrong passwords for ${who}; locked ${LOCK_MIN} min`,
+        });
+      }
+      await user.save();
     }
-    // keep the hourly counter, but the code can't be used again
-    otp.codeHash = hash(crypto.randomBytes(16).toString('hex'));
-    otp.expiresAt = new Date(Date.now() + 3600 * 1000);
-    await otp.save();
+    throw new HttpError(401, wrongMessage);
+  }
+  user.failedLogins = 0;
+  user.lockUntil = undefined;
+}
 
-    const user = await User.findOne({ mobile, role: 'customer' });
-    if (user) return res.json({ token: signToken(user), user: publicUser(user) });
-    // New number: ask for name/email next. This short token proves the OTP was verified.
-    const signupToken = jwt.sign({ mobile, purpose: 'signup' }, process.env.JWT_SECRET, { expiresIn: '20m' });
-    res.json({ needsProfile: true, signupToken });
-  })
-);
-
-// FR-1: finish creating the account (after OTP), with C5 consent
+// FR-1: customer sign up with username + password (mobile is saved for SMS updates, not verified)
 r.post(
-  '/complete-signup',
+  '/register',
+  registerLimit,
   ah(async (req, res) => {
-    let payload;
-    try {
-      payload = jwt.verify(String(req.body.signupToken || ''), process.env.JWT_SECRET);
-    } catch {
-      throw new HttpError(400, 'This sign-up link expired. Enter your number again.');
-    }
-    if (payload.purpose !== 'signup') throw new HttpError(400, 'Invalid sign-up request.');
     const name = String(req.body.name || '').trim().slice(0, 80);
+    const username = String(req.body.username || '').trim().toLowerCase();
+    const mobile = cleanMobile(req.body.mobile);
     const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+
     if (name.length < 2) throw new HttpError(400, 'Enter your full name.');
+    if (!USERNAME_RE.test(username)) throw new HttpError(400, 'Username must be 4 to 20 characters: letters, numbers, dot or underscore.');
+    if (RESERVED_USERNAMES.includes(username)) throw new HttpError(400, 'That username is not available. Try another.');
+    if (!MOBILE_RE.test(mobile)) throw new HttpError(400, 'Enter a valid 10-digit mobile number.');
     if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'Enter a valid email address.');
+    const problem = checkCustomerPassword(password, username);
+    if (problem) throw new HttpError(400, problem);
     if (req.body.consent !== true) throw new HttpError(400, 'Please agree to the privacy policy to continue.');
-    let user = await User.findOne({ mobile: payload.mobile, role: 'customer' });
-    if (!user) {
+
+    const [usernameTaken, mobileTaken] = await Promise.all([User.exists({ username }), User.exists({ mobile })]);
+    if (usernameTaken) throw new HttpError(409, 'That username is already taken. Try another.');
+    if (mobileTaken) throw new HttpError(409, 'This mobile number already has an account. Log in instead.');
+
+    let user;
+    try {
       user = await User.create({
         name,
-        mobile: payload.mobile,
+        username,
+        mobile,
         email,
         role: 'customer',
+        passwordHash: await bcrypt.hash(password, 10),
         consentAt: new Date(),
         consentVersion: PRIVACY_VERSION,
       });
+    } catch (e) {
+      if (e.code === 11000) throw new HttpError(409, 'That username or mobile number is already registered.');
+      throw e;
     }
+    res.status(201).json({ token: signToken(user), user: publicUser(user) });
+  })
+);
+
+// FR-2: customer login with username + password
+r.post(
+  '/login',
+  loginLimit,
+  ah(async (req, res) => {
+    const username = String(req.body.username || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const user = await User.findOne({ username, role: 'customer' }).select('+passwordHash');
+    await checkLogin(req, user, password, username, 'Wrong username or password.');
+    await user.save();
     res.json({ token: signToken(user), user: publicUser(user) });
   })
 );
 
-// FR-4 Admin login (owner or staff) with D6 lockout
-const MAX_FAILS = 5;
-const LOCK_MIN = 15;
+// FR-4: admin login (owner or staff) with email + password
 r.post(
   '/admin/login',
+  loginLimit,
   ah(async (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const user = await User.findOne({ email, role: { $in: ['owner', 'staff'] } }).select('+passwordHash');
-    if (user?.lockUntil && user.lockUntil > new Date()) {
-      const mins = Math.ceil((user.lockUntil - Date.now()) / 60000);
-      throw new HttpError(429, `Too many wrong passwords. This login is locked for ${mins} more minute${mins > 1 ? 's' : ''}.`);
-    }
-    const ok = user && (await bcrypt.compare(password, user.passwordHash || ''));
-    if (!ok) {
-      if (user) {
-        user.failedLogins = (user.failedLogins || 0) + 1;
-        if (user.failedLogins >= MAX_FAILS) {
-          user.lockUntil = new Date(Date.now() + LOCK_MIN * 60 * 1000);
-          user.failedLogins = 0;
-          await audit({ user: { id: user._id, name: user.name, role: user.role }, ip: req.ip }, 'login.locked', {
-            targetType: 'user',
-            targetId: user._id,
-            summary: `${MAX_FAILS} wrong passwords for ${email}; locked ${LOCK_MIN} min`,
-          });
-        }
-        await user.save();
-      }
-      throw new HttpError(401, 'Wrong email or password.');
-    }
-    user.failedLogins = 0;
-    user.lockUntil = undefined;
+    await checkLogin(req, user, password, email, 'Wrong email or password.');
     // D5: still on the default or a weak password? Ask them to change it.
     if (DEFAULT_PASSWORDS.includes(password) || checkStrongPassword(password)) user.mustChangePassword = true;
     await user.save();
@@ -167,14 +154,14 @@ r.post(
   })
 );
 
-// D5: staff/owner change their own password (also signs out other sessions)
+// D5: change your own password (also signs out other sessions)
 r.post(
   '/change-password',
-  auth(['owner', 'staff']),
+  auth(),
   ah(async (req, res) => {
     const user = await User.findById(req.user.id).select('+passwordHash');
     if (!(await bcrypt.compare(String(req.body.current || ''), user.passwordHash || ''))) throw new HttpError(400, 'Your current password is wrong.');
-    const problem = checkStrongPassword(req.body.next);
+    const problem = user.role === 'customer' ? checkCustomerPassword(req.body.next, user.username) : checkStrongPassword(req.body.next);
     if (problem) throw new HttpError(400, problem);
     if (req.body.next === req.body.current) throw new HttpError(400, 'Choose a new password, different from the current one.');
     user.passwordHash = await bcrypt.hash(String(req.body.next), 10);
@@ -258,7 +245,7 @@ r.delete(
     await PrintJob.deleteMany({ user: req.user.id, paymentStatus: { $nin: ['Paid', 'Refunded'] } });
     await User.updateOne(
       { _id: req.user.id },
-      { $set: { name: 'Deleted customer', deletedAt: new Date() }, $unset: { mobile: 1, email: 1 }, $inc: { tokenVersion: 1 } }
+      { $set: { name: 'Deleted customer', deletedAt: new Date() }, $unset: { username: 1, passwordHash: 1, mobile: 1, email: 1 }, $inc: { tokenVersion: 1 } }
     );
     res.json({ ok: true });
   })

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomInt } from 'crypto';
 import bcrypt from 'bcryptjs';
 import ExcelJS from 'exceljs';
 import {
@@ -413,6 +414,35 @@ r.post(
       summary: `Rs ${payment.refund?.amount ?? req.body.amount} of Rs ${payment.amount}${reason ? ` (${reason})` : ''}`,
     });
     res.json(await Payment.findById(payment._id).populate('user', 'name mobile').populate('order', 'serviceName receiptNo').populate('printJob', 'fileName receiptNo'));
+  })
+);
+
+// Customer forgot their password: the owner sets a temporary one and tells them at the counter or by phone.
+// The customer is asked to choose their own password the first time they log in with it.
+const TEMP_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+function makeTempPassword() {
+  for (;;) {
+    const p = Array.from({ length: 10 }, () => TEMP_CHARS[randomInt(TEMP_CHARS.length)]).join('');
+    if (/[a-z]/i.test(p) && /\d/.test(p)) return p;
+  }
+}
+
+r.post(
+  '/customers/:id/reset-password',
+  owner,
+  ah(async (req, res) => {
+    const user = await User.findOne({ _id: req.params.id, role: 'customer', deletedAt: { $exists: false } });
+    if (!user) throw new HttpError(404, 'Customer not found.');
+    if (!user.username) throw new HttpError(400, 'This is an old account without a username. Ask the customer to create a new account.');
+    const tempPassword = makeTempPassword();
+    user.passwordHash = await bcrypt.hash(tempPassword, 10);
+    user.mustChangePassword = true;
+    user.tokenVersion = (user.tokenVersion || 0) + 1; // signs them out everywhere
+    user.failedLogins = 0;
+    user.lockUntil = undefined;
+    await user.save();
+    await audit(req, 'password.reset', { targetType: 'user', targetId: user._id, summary: `Reset password for ${user.username}` });
+    res.json({ username: user.username, tempPassword });
   })
 );
 
