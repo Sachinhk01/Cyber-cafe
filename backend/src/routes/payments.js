@@ -77,6 +77,11 @@ r.post(
       return res.json({ paymentId: free._id, free: true });
     }
 
+    // Close older unfinished attempts for this item, so only the newest price can be paid
+    await Payment.updateMany(
+      { [kind === 'order' ? 'order' : 'printJob']: target._id, status: 'Pending', createdAt: { $lt: new Date(Date.now() - 15 * 60 * 1000) } },
+      { status: 'Failed' }
+    );
     const gw = await createGatewayOrder(amount, String(target._id));
     const payment = await Payment.create({
       user: req.user.id,

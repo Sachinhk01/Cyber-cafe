@@ -1,13 +1,16 @@
 // End-to-end API test: walks through every main flow and loophole fix.
 //
-//   1. Start the API in development mode (npm run dev) with NO Razorpay keys and NO SMS provider,
-//      so test payments and on-screen OTPs are on.
+//   1. Start the API in development mode (npm run dev) with NO Razorpay keys,
+//      so test payments are on.
 //   2. In a second terminal:  npm run smoke -- --yes
 //
 // Use a TEST database (a separate MONGO_URI): it creates customers, orders and a temporary staff login.
 // Env: API_URL (default http://localhost:5000), OWNER_EMAIL / OWNER_PASSWORD (default: ADMIN_EMAIL / ADMIN_PASSWORD from .env)
 import 'dotenv/config';
+import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { PDFDocument } from 'pdf-lib';
+import { User } from '../src/models.js';
 
 if (!process.argv.includes('--yes')) {
   console.log('This test writes test data (customers, orders, a temporary staff login) to the database the API uses.');
@@ -59,13 +62,14 @@ async function makePdf(pages) {
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082', 'hex');
 const blob = (buf, type) => new Blob([buf], { type });
 
-async function customer(label) {
-  const mobile = rnd();
-  const s = await call('/auth/send-otp', { method: 'POST', body: { mobile } });
-  if (!s.data.devOtp) throw new Error('No devOtp returned. Run the API with NODE_ENV=development and no SMS_PROVIDER.');
-  const v = await call('/auth/verify-otp', { method: 'POST', body: { mobile, otp: s.data.devOtp } });
-  const c = await call('/auth/complete-signup', { method: 'POST', body: { signupToken: v.data.signupToken, name: label, email: '', consent: true } });
-  return { mobile, token: c.data.token, user: c.data.user };
+const uname = (prefix) => (prefix + Date.now().toString(36) + Math.floor(Math.random() * 1e4)).toLowerCase().slice(0, 20);
+
+async function customer(label, email = '') {
+  const username = uname('c');
+  const password = 'pass' + Math.floor(Math.random() * 1e6);
+  const r = await call('/auth/register', { method: 'POST', body: { name: label, username, mobile: rnd(), email, password, consent: true } });
+  if (r.status !== 201) throw new Error(`Could not register a test customer: ${r.status} ${JSON.stringify(r.data)}`);
+  return { username, password, token: r.data.token, user: r.data.user };
 }
 
 async function pay(token, kind, id) {
@@ -75,35 +79,58 @@ async function pay(token, kind, id) {
 }
 
 async function main() {
+  // The reset-password test reads the token from the same database the API uses
+  await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/cyber_cafe', { serverSelectionTimeoutMS: 15000 });
   section('Health');
   const h = await call('/health');
   check('API is up and the database is connected', h.status === 200 && h.data.db === true, JSON.stringify(h.data));
   const cfg = await call('/payments/config');
   if (!cfg.data.mock) throw new Error('Razorpay keys are set. Run this test without RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET (test payments).');
 
-  section('Login with OTP (D3, D4, C5)');
-  const mobile = rnd();
-  let r = await call('/auth/send-otp', { method: 'POST', body: { mobile: '12345' } });
+  section('Sign up and login with username + password (C5)');
+  const u1 = uname('smoke');
+  const base = { name: 'Smoke Customer', username: u1, mobile: rnd(), email: `${u1}@example.com`, password: 'smoke1234', consent: true };
+  let r = await call('/auth/register', { method: 'POST', body: { ...base, mobile: '12345' } });
   check('Rejects an invalid mobile number', r.status === 400);
-  r = await call('/auth/send-otp', { method: 'POST', body: { mobile } });
-  check('Unknown number gets a code (no "no account" message)', r.status === 200 && !!r.data.devOtp);
-  const otp = r.data.devOtp;
-  r = await call('/auth/send-otp', { method: 'POST', body: { mobile } });
-  check('Second code within 30 s is refused (per number)', r.status === 429);
-  r = await call('/auth/verify-otp', { method: 'POST', body: { mobile, otp: otp === '111111' ? '222222' : '111111' } });
-  check('Wrong code is refused', r.status === 400);
-  r = await call('/auth/verify-otp', { method: 'POST', body: { mobile, otp } });
-  check('New number: no account yet, asks for profile', r.status === 200 && r.data.needsProfile && !r.data.token);
-  const signupToken = r.data.signupToken;
-  r = await call('/auth/verify-otp', { method: 'POST', body: { mobile, otp } });
-  check('The same code cannot be used twice', r.status === 400);
-  r = await call('/auth/complete-signup', { method: 'POST', body: { signupToken, name: 'Smoke Customer', consent: false } });
+  r = await call('/auth/register', { method: 'POST', body: { ...base, username: 'ab' } });
+  check('Rejects a too-short username', r.status === 400);
+  r = await call('/auth/register', { method: 'POST', body: { ...base, password: 'abc' } });
+  check('Rejects a too-short password', r.status === 400);
+  r = await call('/auth/register', { method: 'POST', body: { ...base, consent: false } });
   check('Account needs privacy consent', r.status === 400);
-  r = await call('/auth/complete-signup', { method: 'POST', body: { signupToken, name: 'Smoke Customer', email: 'smoke@example.com', consent: true } });
-  check('Account created after OTP + consent', r.status === 200 && !!r.data.token);
+  r = await call('/auth/register', { method: 'POST', body: base });
+  check('Account created', r.status === 201 && !!r.data.token, JSON.stringify(r.data).slice(0, 120));
+  r = await call('/auth/register', { method: 'POST', body: { ...base, mobile: rnd() } });
+  check('Same username cannot register twice', r.status === 409);
+  r = await call('/auth/login', { method: 'POST', body: { username: u1, password: 'wrong-pass' } });
+  check('Wrong password is refused', r.status === 401 || r.status === 400);
+  r = await call('/auth/login', { method: 'POST', body: { username: u1.toUpperCase(), password: base.password } });
+  check('Login works (username is not case-sensitive)', r.status === 200 && !!r.data.token);
   const c1 = { token: r.data.token, user: r.data.user };
   r = await call('/auth/me', { token: c1.token });
   check('Profile loads', r.status === 200 && r.data.name === 'Smoke Customer');
+
+  section('Forgot / reset password');
+  const ghost = await call('/auth/forgot-password', { method: 'POST', body: { identifier: 'no_such_user_' + Date.now() } });
+  r = await call('/auth/forgot-password', { method: 'POST', body: { identifier: u1 } });
+  check('Same answer for unknown and real accounts', r.status === 200 && ghost.status === 200 && r.data.message === ghost.data.message);
+  const withToken = await User.findOne({ username: u1 }).select('+resetTokenHash').lean();
+  check('A reset token (hashed) is stored for the account', !!withToken?.resetTokenHash && withToken.resetTokenExpires > new Date());
+  const token = crypto.randomBytes(32).toString('hex');
+  await User.updateOne({ username: u1 }, { resetTokenHash: crypto.createHash('sha256').update(token).digest('hex'), resetTokenExpires: new Date(Date.now() + 60000) });
+  r = await call('/auth/reset-password', { method: 'POST', body: { token: 'f'.repeat(64), password: 'newpass99' } });
+  check('A wrong reset link is refused', r.status === 400);
+  r = await call('/auth/reset-password', { method: 'POST', body: { token, password: 'newpass99' } });
+  check('Password is reset with the link', r.status === 200 && r.data.role === 'customer');
+  r = await call('/auth/reset-password', { method: 'POST', body: { token, password: 'another99' } });
+  check('The same link cannot be used twice', r.status === 400);
+  r = await call('/auth/me', { token: c1.token });
+  check('Old sessions are signed out after a reset', r.status === 401);
+  r = await call('/auth/login', { method: 'POST', body: { username: u1, password: base.password } });
+  check('Old password no longer works', r.status !== 200);
+  r = await call('/auth/login', { method: 'POST', body: { username: u1, password: 'newpass99' } });
+  check('New password works', r.status === 200);
+  c1.token = r.data.token;
 
   section('Services with procedure (A2)');
   r = await call('/services');
@@ -166,6 +193,9 @@ async function main() {
   const paymentId = r.data.payments.find((p) => p.status === 'Success')?._id;
   r = await call(`/payments/${paymentId}/invoice.pdf`, { token: c1.token, raw: true });
   check('PDF receipt downloads', r.status === 200 && r.data.subarray(0, 4).toString() === '%PDF');
+  r = await call('/payments/mine', { token: c1.token });
+  const receipts = (r.data || []).filter((p) => p.status === 'Success').map((p) => p.order?.receiptNo || p.printJob?.receiptNo); // the number is stored on the order / print job
+  check('Receipt numbers look like CC-YYYYMMDD-N', receipts.length > 0 && receipts.every((x) => /^CC-\d{8}-\d+$/.test(x || '')), receipts.join(','));
   r = await call('/payments/create', { method: 'POST', token: c1.token, body: { kind: 'order', id: order1._id } });
   check('Paying an already-paid order is refused', r.status === 400);
   r = await call(`/orders/${order1._id}`, { method: 'DELETE', token: c1.token });
@@ -187,7 +217,12 @@ async function main() {
   r = await call(`/print/${job._id}`, { method: 'PATCH', token: c1.token, body: { copies: 2, colorMode: 'color', paperSize: 'A4' } });
   const pub = (await call('/public-settings')).data;
   check('Price = rate × pages × copies', r.data.price === pub.printRates.color.A4 * 3 * 2, `price ${r.data.price}`);
-  r = await pay(c1.token, 'print', job._id);
+  // Loophole fix: options cannot change while a payment for the old price is open
+  const started = await call('/payments/create', { method: 'POST', token: c1.token, body: { kind: 'print', id: job._id } });
+  r = await call(`/print/${job._id}`, { method: 'PATCH', token: c1.token, body: { copies: 50, colorMode: 'color', paperSize: 'A4' } });
+  check('Print options are locked while a payment is in progress', r.status === 400, JSON.stringify(r.data).slice(0, 120));
+  r = await call('/payments/mock-confirm', { method: 'POST', token: c1.token, body: { paymentId: started.data.paymentId, outcome: 'success' } });
+  check('Payment for the shown price succeeds', r.status === 200 && r.data.status === 'Success');
   r = await call('/print', { token: c1.token });
   const paidJob = r.data.find((j) => j._id === job._id);
   check('Paid print job gets a 4-digit pickup code', /^\d{4}$/.test(paidJob.pickupCode || ''));
@@ -367,7 +402,8 @@ main()
     fails.push(e.message);
     console.error('\n\x1b[31mStopped:\x1b[0m', e.message);
   })
-  .finally(() => {
+  .finally(async () => {
+    await mongoose.disconnect().catch(() => {});
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed) console.log('Failed:\n - ' + fails.join('\n - '));
     process.exit(failed ? 1 : 0);

@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import Razorpay from 'razorpay';
-import { Order, Payment, PrintJob, User, Service } from '../models.js';
+import { Order, Payment, PrintJob, User, Service, nextNumber } from '../models.js';
 import { notifyUser } from './notify.js';
 import { buildInvoicePdf, invoiceFileName } from './invoice.js';
 
@@ -15,12 +15,15 @@ async function receiptAttachment(paymentId) {
   }
 }
 
-export const mockMode = !process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET;
 const isProd = process.env.NODE_ENV === 'production';
+// TEST_MODE=1 (never on a live server) forces test payments, e.g. for the automatic tests.
+// Keys are trimmed so a stray space in .env does not count as a key.
+const testMode = process.env.TEST_MODE === '1' && !isProd;
+export const mockMode = testMode || !process.env.RAZORPAY_KEY_ID?.trim() || !process.env.RAZORPAY_KEY_SECRET?.trim();
 
 const rz = mockMode
   ? null
-  : new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
+  : new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID.trim(), key_secret: process.env.RAZORPAY_KEY_SECRET.trim() });
 
 // B1 + B2: a live server must never fall back to test payments, and must have the webhook,
 // otherwise a customer who closes the browser after paying would stay "unpaid".
@@ -59,10 +62,11 @@ function safeEqual(a, b) {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
-const receiptNo = () => {
-  const d = new Date();
-  const ymd = d.toISOString().slice(0, 10).replace(/-/g, '');
-  return `CC-${ymd}-${crypto.randomInt(1000, 9999)}`;
+// Running counter, so two payments can never get the same receipt number
+const receiptNo = async () => {
+  const ymd = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10).replace(/-/g, ''); // India date
+  const n = await nextNumber('receipt', 'R');
+  return `CC-${ymd}-${n.slice(2)}`;
 };
 
 // Idempotent: safe to call from checkout verify AND the webhook.
@@ -78,6 +82,16 @@ export async function markPaymentSuccess(payment, gatewayPaymentId) {
   const user = await User.findById(updated.user);
   const Model = updated.kind === 'order' ? Order : PrintJob;
   const targetId = updated.kind === 'order' ? updated.order : updated.printJob;
+
+  // Price changed after the payment started (e.g. copies edited in another tab):
+  // don't mark the item paid; flag the payment for a refund instead.
+  const item = await Model.findById(targetId).select('totalAmount price').lean();
+  const expected = updated.kind === 'order' ? item?.totalAmount : item?.price;
+  if (!item || Number(expected) !== Number(updated.amount)) {
+    await Payment.updateOne({ _id: updated._id }, { duplicate: true, mismatch: true });
+    console.warn(`Payment ${updated._id} (Rs ${updated.amount}) does not match the price Rs ${expected}. Refund it from the admin panel.`);
+    return;
+  }
 
   // The same item was already paid (e.g. paid in two tabs). Keep the first receipt,
   // flag this payment so the owner can refund it from Admin > Payments.
@@ -97,7 +111,7 @@ export async function markPaymentSuccess(payment, gatewayPaymentId) {
       {
         status: 'Submitted',
         paymentStatus: 'Paid',
-        receiptNo: receiptNo(),
+        receiptNo: await receiptNo(),
         paidAt: now,
         ...(days > 0 ? { expectedBy: new Date(now.getTime() + days * 86400000) } : {}),
         $push: { history: { status: 'Submitted', note: 'Payment received', by: 'System', byRole: 'system', at: now } },
@@ -116,7 +130,7 @@ export async function markPaymentSuccess(payment, gatewayPaymentId) {
       {
         status: 'Pending',
         paymentStatus: 'Paid',
-        receiptNo: receiptNo(),
+        receiptNo: await receiptNo(),
         paidAt: now,
         pickupCode: String(crypto.randomInt(1000, 9999)),
       },

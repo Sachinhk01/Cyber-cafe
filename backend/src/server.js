@@ -70,14 +70,24 @@ app.use(express.json({ limit: '1mb' }));
 // D1: generous per-IP limits (a cafe's shared WiFi is one IP); the real OTP limit is per mobile number
 const limit = (windowMin, max, extra = {}) =>
   rateLimit({ windowMs: windowMin * 60 * 1000, limit: max, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Too many requests. Wait a few minutes and try again.' }, ...extra });
-app.use(['/api/auth/send-otp', '/api/auth/verify-otp', '/api/auth/complete-signup'], limit(10, 100));
+
 app.use('/api/auth/admin/login', limit(10, 30));
 // D2: uploads are limited per logged-in user
 const byLogin = (req) => 'u:' + (req.headers.authorization || 'anonymous').slice(-40);
 app.post(['/api/orders', '/api/print'], limit(10, 20, { keyGenerator: byLogin }));
 app.use('/api/payments/create', limit(10, 40, { keyGenerator: byLogin }));
 
-app.get('/api/health', (req, res) => res.json({ ok: true, db: mongoose.connection.readyState === 1 }));
+// 200 only when the database is connected
+app.get('/api/health', (req, res) => {
+  const db = mongoose.connection.readyState === 1;
+  res.status(db ? 200 : 503).json({ ok: db, db });
+});
+
+// While MongoDB is still connecting, answer clearly instead of failing
+app.use('/api', (req, res, next) => {
+  if (mongoose.connection.readyState === 1) return next();
+  res.status(503).json({ error: 'The server is starting up. Try again in a few seconds.' });
+});
 
 // Public info the customer app shows: print rates, retention, cafe details and hours, refund policy
 app.get('/api/public-settings', async (req, res, next) => {
@@ -124,13 +134,34 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: status >= 500 ? 'Something went wrong on the server.' : err.message });
 });
 
-const PORT = process.env.PORT || 5000;
-mongoose
-  .connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/cyber_cafe', { serverSelectionTimeoutMS: 15000 })
-  .then(async () => {
+const PORT = Number(process.env.PORT || 5000);
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/cyber_cafe';
+if (isProd && !process.env.MONGO_URI) {
+  console.error('MONGO_URI is required in production.');
+  process.exit(1);
+}
+
+// Start listening at once; background jobs start after MongoDB connects
+const server = app.listen(PORT, () => console.log(`API running on http://localhost:${PORT}`));
+// Keep idle connections open longer than the dev proxy / load balancer does, so a reused
+// connection is never closed by the server mid-request (that shows up as ECONNRESET).
+server.keepAliveTimeout = 65 * 1000;
+server.headersTimeout = 66 * 1000;
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') console.error(`Port ${PORT} is already in use. Stop the other server or change PORT in .env.`);
+  else console.error('Server error:', e.message);
+  process.exit(1);
+});
+
+let jobsStarted = false;
+async function connectWithRetry(attempt = 1) {
+  try {
+    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 15000 });
     console.log('MongoDB connected');
+    if (jobsStarted) return;
+    jobsStarted = true;
     try {
-      await seedIfEmpty(); // first run: owner login + sample services, so the Services page is never empty
+      await seedIfEmpty();
     } catch (e) {
       console.error('First-run setup failed:', e.message);
     }
@@ -138,17 +169,36 @@ mongoose
     startBackupJob();
     startNotificationRetryJob();
     startReconcileJob();
-    app.listen(PORT, () => console.log(`API running on http://localhost:${PORT}`));
-  })
-  .catch((e) => {
-    console.error('Could not connect to MongoDB:', e.message);
-    if (/whitelist|IP|ENOTFOUND|ETIMEOUT|querySrv/i.test(e.message)) {
-      console.error(
-        '\nTip: in MongoDB Atlas open "Network Access" and add your current IP address' +
-          ' (or 0.0.0.0/0 while testing). Also check the user name and password in MONGO_URI.\n'
-      );
+  } catch (e) {
+    console.error(`Could not connect to MongoDB (attempt ${attempt}):`, e.message);
+    if (/whitelist|IP|ENOTFOUND|ETIMEOUT|querySrv|Server selection/i.test(e.message)) {
+      console.error('Tip: in MongoDB Atlas open "Network Access" and add your current IP address.');
     }
-    process.exit(1);
+    if (/bad auth|authentication failed/i.test(e.message)) console.error('Tip: the user name or password in MONGO_URI is wrong.');
+    const wait = Math.min(30, 5 * attempt);
+    console.error(`Retrying in ${wait} seconds...`);
+    setTimeout(() => connectWithRetry(attempt + 1), wait * 1000);
+  }
+}
+connectWithRetry();
+mongoose.connection.on('disconnected', () => console.warn('MongoDB disconnected. Reconnecting...'));
+mongoose.connection.on('reconnected', () => console.log('MongoDB reconnected'));
+mongoose.connection.on('error', (e) => console.error('MongoDB error:', e.message));
+
+// Log crashes, and shut down cleanly when the host restarts the app
+process.on('unhandledRejection', (e) => console.error('Unhandled promise rejection:', e));
+process.on('uncaughtException', (e) => {
+  console.error('Uncaught exception:', e);
+  // In production the host restarts the app. In development keep running, because
+  // `node --watch` would otherwise wait for a file change and the API stays down.
+  if (isProd) process.exit(1);
+});
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    console.log(`${sig} received, shutting down...`);
+    server.close(() => mongoose.connection.close(false).finally(() => process.exit(0)));
+    setTimeout(() => process.exit(0), 10000).unref();
   });
+}
 
 export default app;

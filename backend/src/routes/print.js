@@ -86,7 +86,11 @@ r.patch(
   ah(async (req, res) => {
     const job = await PrintJob.findOne({ _id: req.params.id, user: req.user.id }).catch(() => null);
     if (!job) throw new HttpError(404, 'Print job not found.');
-    if (job.paymentStatus === 'Paid') throw new HttpError(400, 'This job is already paid.');
+    if (['Paid', 'Refunded'].includes(job.paymentStatus)) throw new HttpError(400, 'This job is already paid.');
+    // A payment already started for the old price must finish (or fail) first
+    if (await Payment.exists({ printJob: job._id, status: 'Pending', createdAt: { $gt: new Date(Date.now() - 15 * 60 * 1000) } })) {
+      throw new HttpError(400, 'A payment for this job is in progress. Finish it, or wait 15 minutes before changing the options.');
+    }
     const opts = parseOptions(req.body);
     const { printRates } = await getSettings();
     Object.assign(job, opts, { price: printPrice(printRates, { pages: job.pages, ...opts }) });

@@ -11,7 +11,9 @@
     "backup": "node src/scripts/backup.js",
     "restore": "node src/scripts/backup.js restore",
     "cleanup": "node src/scripts/cleanup.js",
-    "smoke": "node scripts/smoke-test.js"
+    "reset-owner": "node src/scripts/reset-owner.js",
+    "smoke": "node scripts/smoke-test.js",
+    "test:api": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-tests.ps1"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

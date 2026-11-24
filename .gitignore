@@ -8,6 +8,8 @@ node_modules
 
 # Customer files
 uploads
+uploads-test
+test-server*.log
 
 # Build output
 dist

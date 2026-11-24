@@ -1,10 +1,12 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { User, Order, PrintJob, Document, Payment, PRIVACY_VERSION } from '../models.js';
 import { ah, auth, signToken, HttpError, checkStrongPassword, DEFAULT_PASSWORDS } from '../lib/auth.js';
 import { removeFile } from '../lib/upload.js';
 import { audit } from '../lib/audit.js';
+import { sendEmail } from '../lib/notify.js';
 
 const r = Router();
 
@@ -37,6 +39,7 @@ const limiter = (windowMin, max) =>
   });
 const loginLimit = limiter(10, 100);
 const registerLimit = limiter(60, 30);
+const resetLimit = limiter(60, 20);
 
 // Customer password rule: kept simple on purpose (4 or more characters, anything goes).
 // Owner and staff use the stricter checkStrongPassword.
@@ -151,6 +154,81 @@ r.post(
     if (DEFAULT_PASSWORDS.includes(password) || checkStrongPassword(password)) user.mustChangePassword = true;
     await user.save();
     res.json({ token: signToken(user), user: publicUser(user) });
+  })
+);
+
+// ---------- Forgot / reset password (customers, staff and owner) ----------
+const RESET_MINUTES = 30;
+const hashToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+const appUrl = () => (process.env.CLIENT_URL || 'http://localhost:5173').split(',')[0].trim().replace(/\/$/, '');
+
+// Step 1: user enters username or email. If an account with an email matches, a one-time link is emailed.
+// The answer is always the same, so nobody can find out which accounts exist.
+r.post(
+  '/forgot-password',
+  resetLimit,
+  ah(async (req, res) => {
+    const id = String(req.body.identifier || '').trim().toLowerCase();
+    const reply = {
+      ok: true,
+      message: 'If an account matches and has an email address, we have sent a reset link. It works for 30 minutes. No email on your account? Ask the cafe to reset your password.',
+    };
+    if (id.length < 3) return res.json(reply);
+
+    const user = id.includes('@')
+      ? await User.findOne({ email: id, deletedAt: { $exists: false } })
+      : await User.findOne({ username: id, role: 'customer', deletedAt: { $exists: false } });
+    if (!user || !user.email) return res.json(reply);
+
+    const token = crypto.randomBytes(32).toString('hex');
+    user.resetTokenHash = hashToken(token);
+    user.resetTokenExpires = new Date(Date.now() + RESET_MINUTES * 60 * 1000);
+    await user.save();
+
+    const link = `${appUrl()}/reset-password?token=${token}`;
+    await sendEmail(
+      user.email,
+      'Reset your password',
+      `Hi ${user.name},\n\nSomeone asked to reset the password for your ${process.env.CAFE_NAME || 'Cyber Cafe'} account.\nOpen this link to choose a new password (valid for ${RESET_MINUTES} minutes):\n\n${link}\n\nIf this wasn't you, ignore this email. Your password stays the same.`
+    );
+    await audit({ user: { id: user._id, name: user.name, role: user.role }, ip: req.ip }, 'password.reset-requested', {
+      targetType: 'user',
+      targetId: user._id,
+      summary: `Reset link sent to ${user.email}`,
+    });
+    res.json(reply);
+  })
+);
+
+// Step 2: user opens the link and sets a new password. The link works once.
+r.post(
+  '/reset-password',
+  resetLimit,
+  ah(async (req, res) => {
+    const token = String(req.body.token || '');
+    const next = String(req.body.password || '');
+    if (!/^[0-9a-f]{64}$/.test(token)) throw new HttpError(400, 'This reset link is not valid. Ask for a new one.');
+
+    const user = await User.findOne({ resetTokenHash: hashToken(token), resetTokenExpires: { $gt: new Date() } }).select('+passwordHash +resetTokenHash');
+    if (!user) throw new HttpError(400, 'This reset link has expired or was already used. Ask for a new one.');
+
+    const problem = user.role === 'customer' ? checkCustomerPassword(next, user.username) : checkStrongPassword(next);
+    if (problem) throw new HttpError(400, problem);
+
+    user.passwordHash = await bcrypt.hash(next, 10);
+    user.resetTokenHash = undefined;
+    user.resetTokenExpires = undefined;
+    user.mustChangePassword = false;
+    user.failedLogins = 0;
+    user.lockUntil = undefined;
+    user.tokenVersion = (user.tokenVersion || 0) + 1; // signs out every old session
+    await user.save();
+    await audit({ user: { id: user._id, name: user.name, role: user.role }, ip: req.ip }, 'password.reset-done', {
+      targetType: 'user',
+      targetId: user._id,
+      summary: 'Password reset with emailed link',
+    });
+    res.json({ ok: true, role: user.role });
   })
 );
 

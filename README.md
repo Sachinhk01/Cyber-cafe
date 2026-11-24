@@ -8,7 +8,7 @@ Customer app + admin panel + API, built from the SRS v1.0.
 ## 1. Requirements
 
 - Node.js 18 or newer (20 LTS recommended)
-- The MongoDB Atlas database is already set in `backend/.env` (`MONGO_URI`)
+- A MongoDB database. `backend/.env` is not in Git: copy `.env.example` to `.env` and set `MONGO_URI` and `JWT_SECRET`.
 
 ## 2. Run the backend
 
@@ -44,8 +44,8 @@ For a production build: `npm run build` (output in `frontend/dist`).
 ## 4. Try the full flow
 
 **Customer**
-1. Open http://localhost:5173 and enter a mobile number. New numbers add their name after the OTP.
-2. No SMS provider yet, so the OTP shows on the screen (and in the backend console).
+1. Open http://localhost:5173 and create an account (name, username, mobile, password), or log in.
+2. No SMS provider yet, so SMS updates print in the backend console.
 3. Open **Services**, pick one, read how it works and what's included, upload the documents, review, tick "I agree", then pay.
    Your uploaded files can be viewed or downloaded again from the order page; files the cafe sends back appear under "Ready for you".
 4. With no Razorpay keys the app opens a **test payment** box: choose "Pay successfully" or "Simulate failure". After a failure, open the order and pay again; documents are not re-uploaded.
@@ -69,7 +69,7 @@ For a production build: `npm run build` (output in `frontend/dist`).
 
 | Role | Login | Can use |
 |---|---|---|
-| Customer | Mobile + OTP | Services, orders, print, receipts, profile |
+| Customer | Username + password | Services, orders, print, receipts, profile |
 | Staff | Email + password | Orders, print queue |
 | Owner | Email + password | Everything, including revenue, payments, customers, reports, settings |
 

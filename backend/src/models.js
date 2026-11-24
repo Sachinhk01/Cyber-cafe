@@ -38,6 +38,9 @@ export const User = model(
       lockUntil: Date,
       // D5: owner still on the default password from the seed
       mustChangePassword: { type: Boolean, default: false },
+      // Forgot password: only a hash of the emailed token is stored, valid for 30 minutes
+      resetTokenHash: { type: String, select: false },
+      resetTokenExpires: Date,
       // C5: consent record
       consentAt: Date,
       consentVersion: String,
@@ -154,6 +157,7 @@ export const Payment = model(
       paidAt: { type: Date, index: true }, // when it succeeded (used for revenue)
       mock: { type: Boolean, default: false },
       duplicate: { type: Boolean, default: false }, // paid twice for the same item: refund it
+      mismatch: { type: Boolean, default: false }, // amount paid did not match the price: refund it
       refund: {
         status: { type: String, enum: ['None', 'Processed', 'Failed'], default: 'None' },
         amount: Number,

@@ -1,8 +1,11 @@
 import nodemailer from 'nodemailer';
 import { Notification } from '../models.js';
 
+// TEST_MODE=1 (development only): emails and SMS are printed to the console, never sent
+const testMode = process.env.TEST_MODE === '1' && process.env.NODE_ENV !== 'production';
+
 let transporter = null;
-if (process.env.SMTP_HOST) {
+if (process.env.SMTP_HOST && !testMode) {
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 587),
@@ -84,7 +87,7 @@ const PROVIDERS = {
 
 // Returns { ok, error }. For OTPs the caller needs to know if delivery failed.
 export async function sendSmsResult(mobile, text) {
-  const name = (process.env.SMS_PROVIDER || '').toLowerCase();
+  const name = testMode ? '' : (process.env.SMS_PROVIDER || '').toLowerCase();
   if (!name) {
     console.log(`[sms -> ${mobile}] ${text}`);
     return { ok: true };
@@ -104,7 +107,7 @@ export const sendSms = async (mobile, text) => (await sendSmsResult(mobile, text
 // Login OTP (FR-2). Uses each provider's dedicated OTP route where it has one,
 // so you don't need a separate DLT template just for the code.
 export async function sendOtp(mobile, code) {
-  const name = (process.env.SMS_PROVIDER || '').toLowerCase();
+  const name = testMode ? '' : (process.env.SMS_PROVIDER || '').toLowerCase();
   const text = `Your Cyber Cafe login code is ${code}. It expires in 5 minutes.`;
   try {
     if (name === 'fast2sms') {
