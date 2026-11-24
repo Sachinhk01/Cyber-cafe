@@ -99,6 +99,9 @@ export function AdminLogin() {
             <label>
               Password
              <PasswordInput id="apass" autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required />            </label>
+            <p className="muted small">
+              <Link to="/forgot-password">Forgot your password?</Link>
+            </p>
             <ErrorNote error={error} />
             <button className="btn primary lg block" disabled={busy}>
               {busy && <span className="spinner" />} Log in
@@ -1902,15 +1905,15 @@ export function AdminSettings() {
         <div className="form-grid">
           <label className="full">
             Current password
-            <input id="pcur" type="password" autoComplete="current-password" value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })} required />
+            <PasswordInput id="pcur" autoComplete="current-password" value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })} required />
           </label>
           <label>
             New password
-            <input id="pnew" type="password" autoComplete="new-password" value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} required />
+            <PasswordInput id="pnew" autoComplete="new-password" value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} required />
           </label>
           <label>
             Repeat new password
-            <input id="pnew2" type="password" autoComplete="new-password" value={pw.confirm} onChange={(e) => setPw({ ...pw, confirm: e.target.value })} required />
+            <PasswordInput id="pnew2" autoComplete="new-password" value={pw.confirm} onChange={(e) => setPw({ ...pw, confirm: e.target.value })} required />
           </label>
         </div>
         <ErrorNote error={pwErr} />
@@ -1957,7 +1960,7 @@ export function AdminSettings() {
             <div className="cols-3">
               <input id="stname" placeholder="Name" value={nf.name} onChange={(e) => setNf({ ...nf, name: e.target.value })} aria-label="Staff name" />
               <input id="stemail" type="email" placeholder="Email" value={nf.email} onChange={(e) => setNf({ ...nf, email: e.target.value })} aria-label="Staff email" />
-              <input id="stpass" type="password" placeholder="Password (10+ letters & numbers)" value={nf.password} onChange={(e) => setNf({ ...nf, password: e.target.value })} aria-label="Staff password" />
+              <PasswordInput id="stpass" placeholder="Password (10+ letters & numbers)" value={nf.password} onChange={(e) => setNf({ ...nf, password: e.target.value })} aria-label="Staff password" />
             </div>
             <ErrorNote error={staffErr} />
             <div>

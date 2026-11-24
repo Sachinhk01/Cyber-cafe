@@ -98,7 +98,9 @@ export function Login() {
                   Password
                   <PasswordInput id="password" autoComplete="current-password" value={creds.password} onChange={(e) => setCreds({ ...creds, password: e.target.value })} required />
                 </label>
-                <p className="muted small">Forgot your password? Ask the cafe to reset it.</p>
+                <p className="muted small">
+                  <Link to="/forgot-password">Forgot your password?</Link>
+                </p>
                 <ErrorNote error={error} />
                 <button className="btn primary lg block" disabled={busy || !creds.username || !creds.password}>
                   {busy ? <span className="spinner" /> : null} {busy ? 'Logging in…' : 'Log in'}

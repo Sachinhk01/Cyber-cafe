@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, uploadForm, downloadFile, viewDoc, saveDoc, rupees, fmtDate, fmtDay, shortDay, orderRef, printRef } from '../api.js';
 import { useAuth } from '../auth.jsx';
+import { PasswordInput } from '../PasswordInput.jsx';
 import {
   Status,
   ErrorNote,
@@ -34,190 +35,6 @@ import { Icon, serviceIcon, serviceTint } from '../icons.jsx';
 const CATEGORIES = ['Identity', 'Finance', 'Applications', 'Printing'];
 const PROGRESS = { PendingPayment: 0.08, Submitted: 0.34, 'In Progress': 0.66, Completed: 1, Rejected: 1 };
 const PRINT_PROGRESS = { PendingPayment: 0.08, Pending: 0.3, Printing: 0.6, Ready: 0.9, Collected: 1 };
-
-/* ---------- Login / sign up (FR-1, FR-2, D3, D4, C5) ---------- */
-export function Login() {
-  const { login, user } = useAuth();
-  const nav = useNavigate();
-  const loc = useLocation();
-  const cafe = useCafe();
-  const [step, setStep] = useState('mobile'); // mobile -> otp -> profile (new numbers only)
-  const [mobile, setMobile] = useState('');
-  const [otp, setOtp] = useState('');
-  const [profile, setProfile] = useState({ name: '', email: '', consent: false });
-  const [signupToken, setSignupToken] = useState('');
-  const [devOtp, setDevOtp] = useState('');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [wait, setWait] = useState(0);
-
-  useEffect(() => {
-    if (wait <= 0) return;
-    const t = setTimeout(() => setWait(wait - 1), 1000);
-    return () => clearTimeout(t);
-  }, [wait]);
-
-  // Accepts pasted numbers like "+91 98765 43210"
-  const mobileInput = (e) => {
-    let d = e.target.value.replace(/\D/g, '');
-    if (d.length > 10 && (d.startsWith('91') || d.startsWith('0'))) d = d.replace(/^(91|0)/, '');
-    setMobile(d.slice(0, 10));
-  };
-
-  const run = (fn) => async (e) => {
-    e?.preventDefault();
-    setError('');
-    setBusy(true);
-    try {
-      await fn();
-    } catch (err) {
-      setError(err.message);
-    }
-    setBusy(false);
-  };
-
-  const sendCode = run(async () => {
-    const r = await api('/auth/send-otp', { method: 'POST', body: { mobile } });
-    setDevOtp(r.devOtp || '');
-    setOtp('');
-    setStep('otp');
-    setWait(30);
-  });
-
-  const finish = (r) => {
-    login(r.token, r.user);
-    nav(loc.state?.from || '/', { replace: true });
-  };
-
-  const verify = run(async () => {
-    const r = await api('/auth/verify-otp', { method: 'POST', body: { mobile, otp } });
-    if (r.needsProfile) {
-      setSignupToken(r.signupToken);
-      setStep('profile');
-    } else finish(r);
-  });
-
-  const complete = run(async () => {
-    finish(await api('/auth/complete-signup', { method: 'POST', body: { signupToken, ...profile } }));
-  });
-
-  if (user && step !== 'profile') return <Navigate to={user.role === 'customer' ? '/' : '/admin/orders'} replace />;
-
-  return (
-    <div className="auth">
-      <section className="auth-side">
-        <Brand light />
-        <div className="stack">
-          <Eyebrow plain>Your neighbourhood digital desk</Eyebrow>
-          <h1>Everyday services. Made a little easier.</h1>
-          <p>Send your documents, pay online and pick up printouts when they're ready. Aadhaar, PAN, passport help and more{cafe.cafeName ? ` at ${cafe.cafeName}` : ''}.</p>
-        </div>
-        <ul className="auth-points">
-          {[
-            ['upload', 'Upload documents from your phone'],
-            ['shieldCheck', 'Documents are encrypted and deleted after your order'],
-            ['bell', 'Get an SMS when your work is ready'],
-          ].map(([i, t], k) => (
-            <li key={i} className="rise" style={{ '--i': k + 2 }}>
-              <span className="tile sm">
-                <Icon name={i} size={18} />
-              </span>
-              {t}
-            </li>
-          ))}
-        </ul>
-        <div className="art auth-art">
-          <HeroArt />
-        </div>
-      </section>
-
-      <section className="auth-main">
-        <div className="auth-card">
-          <div className="card rise">
-            {step === 'mobile' && (
-              <form onSubmit={sendCode} className="stack fade">
-                <div className="stack-sm">
-                  <h2>Welcome</h2>
-                  <p className="muted">Enter your mobile number. We'll text you a 6-digit code. New here? Your account is created after the code.</p>
-                </div>
-                <label>
-                  Mobile number
-                  <input id="mobile" inputMode="numeric" autoComplete="tel-national" placeholder="10-digit number" value={mobile} onChange={mobileInput} required autoFocus />
-                </label>
-                <ErrorNote error={error} />
-                <button className="btn primary lg block" disabled={busy || mobile.length < 10}>
-                  {busy ? <span className="spinner" /> : null} {busy ? 'Sending code…' : 'Send code'}
-                  {!busy && <Icon name="arrowRight" size={18} className="arrow" />}
-                </button>
-              </form>
-            )}
-
-            {step === 'otp' && (
-              <form onSubmit={verify} className="stack fade">
-                <div className="stack-sm">
-                  <h2>Enter the code</h2>
-                  <p className="muted">
-                    We sent a 6-digit code to <strong>+91 {mobile}</strong>.
-                  </p>
-                </div>
-                {devOtp && <p className="dev-note">Test mode (no SMS provider set): your code is {devOtp}</p>}
-                <input id="otp" className="otp-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} aria-label="6-digit code" required autoFocus />
-                <ErrorNote error={error} />
-                <button className="btn primary lg block" disabled={busy || otp.length < 6}>
-                  {busy ? <span className="spinner" /> : null} {busy ? 'Checking…' : 'Verify and continue'}
-                </button>
-                <div className="row between small">
-                  <button type="button" className="link-btn" onClick={() => setStep('mobile')}>
-                    Change number
-                  </button>
-                  <button type="button" className="link-btn" disabled={busy || wait > 0} onClick={sendCode}>
-                    {wait > 0 ? `Resend in ${wait}s` : 'Resend code'}
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {step === 'profile' && (
-              <form onSubmit={complete} className="stack fade">
-                <div className="stack-sm">
-                  <h2>Nice to meet you</h2>
-                  <p className="muted">Number verified. Tell us your name to finish creating your account.</p>
-                </div>
-                <label>
-                  Full name
-                  <input id="name" autoComplete="name" value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} required autoFocus />
-                </label>
-                <label>
-                  <span>
-                    Email <span className="hint">(for receipts, optional)</span>
-                  </span>
-                  <input id="email" type="email" autoComplete="email" value={profile.email} onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
-                </label>
-                <label className="check">
-                  <input id="consent" type="checkbox" checked={profile.consent} onChange={(e) => setProfile({ ...profile, consent: e.target.checked })} />
-                  <span>
-                    I agree to the{' '}
-                    <Link to="/privacy" target="_blank">
-                      privacy policy
-                    </Link>
-                    . My documents are used only for my orders and deleted afterwards.
-                  </span>
-                </label>
-                <ErrorNote error={error} />
-                <button className="btn primary lg block" disabled={busy || !profile.consent || profile.name.trim().length < 2}>
-                  {busy ? <span className="spinner" /> : null} Create account
-                </button>
-              </form>
-            )}
-          </div>
-          <p className="muted small" style={{ textAlign: 'center' }}>
-            Cafe staff? <Link to="/admin/login">Admin login</Link> · <Link to="/privacy">Privacy</Link> · <Link to="/refund-policy">Refunds</Link>
-          </p>
-        </div>
-      </section>
-    </div>
-  );
-}
 
 function Brand({ light }) {
   const cafe = useCafe();
@@ -1902,10 +1719,32 @@ export function Receipt() {
 
 /* ---------- Profile (FR-3, C5, D7) ---------- */
 export function Profile() {
-  const { user, updateUser, logout } = useAuth();
+  const { user, updateUser, logout, login } = useAuth();
   const nav = useNavigate();
   const cafe = useCafe();
   const [form, setForm] = useState({ name: user.name, email: user.email || '' });
+  const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
+  const [pwMsg, setPwMsg] = useState('');
+  const [pwErr, setPwErr] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+
+  // Also used after the cafe resets the password: the customer lands here to pick their own
+  async function changePassword(e) {
+    e.preventDefault();
+    setPwMsg('');
+    setPwErr('');
+    if (pw.next !== pw.confirm) return setPwErr('The new passwords do not match.');
+    setPwBusy(true);
+    try {
+      const r = await api('/auth/change-password', { method: 'POST', body: { current: pw.current, next: pw.next } });
+      login(r.token, r.user);
+      setPw({ current: '', next: '', confirm: '' });
+      setPwMsg('Password changed. Other devices were signed out.');
+    } catch (e2) {
+      setPwErr(e2.message);
+    }
+    setPwBusy(false);
+  }
   const [msg, setMsg] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1948,7 +1787,10 @@ export function Profile() {
         <span className="avatar lg">{initials(user.name)}</span>
         <div>
           <h1>{user.name}</h1>
-          <p className="muted">+91 {user.mobile}</p>
+          <p className="muted">
+            @{user.username}
+            {user.mobile ? ` · +91 ${user.mobile}` : ''}
+          </p>
         </div>
       </div>
       <form className="card pad-lg stack" onSubmit={save}>
@@ -1964,9 +1806,15 @@ export function Profile() {
             </span>
             <input id="pemail" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
           </label>
-          <label className="full">
+          <label>
             <span>
-              Mobile number <span className="hint">(used to log in, can't be changed)</span>
+              Username <span className="hint">(used to log in, can't be changed)</span>
+            </span>
+            <input id="pusername" value={user.username || ''} disabled />
+          </label>
+          <label>
+            <span>
+              Mobile number <span className="hint">(for SMS updates, can't be changed)</span>
             </span>
             <input id="pmobile" value={user.mobile || ''} disabled />
           </label>
@@ -1976,6 +1824,39 @@ export function Profile() {
         <div>
           <button className="btn primary" disabled={busy}>
             {busy && <span className="spinner" />} Save changes
+          </button>
+        </div>
+      </form>
+
+      <form className="card pad-lg stack" id="password" onSubmit={changePassword}>
+        <h3>Change your password</h3>
+        {user.mustChangePassword ? (
+          <p className="error" role="alert">
+            <Icon name="alert" size={18} />
+            <span>The cafe reset your password. Enter the temporary password you were given, then choose your own.</span>
+          </p>
+        ) : (
+          <p className="muted small">At least 4 characters. Changing it signs you out on other devices.</p>
+        )}
+        <label>
+          Current password
+          <PasswordInput id="cpcur" autoComplete="current-password" value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })} required />
+        </label>
+        <div className="form-grid">
+          <label>
+            New password
+            <PasswordInput id="cpnew" autoComplete="new-password" value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} required />
+          </label>
+          <label>
+            Repeat new password
+            <PasswordInput id="cpnew2" autoComplete="new-password" value={pw.confirm} onChange={(e) => setPw({ ...pw, confirm: e.target.value })} required />
+          </label>
+        </div>
+        <ErrorNote error={pwErr} />
+        <SuccessNote>{pwMsg}</SuccessNote>
+        <div>
+          <button className="btn" disabled={pwBusy || !pw.current || !pw.next || !pw.confirm}>
+            {pwBusy && <span className="spinner" />} Change password
           </button>
         </div>
       </form>

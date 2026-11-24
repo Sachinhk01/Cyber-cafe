@@ -19,6 +19,7 @@ import {
   AdminSettings,
 } from './pages/Admin.jsx';
 import { Privacy, RefundPolicy } from './pages/Legal.jsx';
+import { ForgotPassword, ResetPassword } from './pages/ResetPassword.jsx';
 
 const C = ({ children }) => <Protected roles={['customer']}>{children}</Protected>;
 const A = ({ children }) => <Protected roles={['owner', 'staff']}>{children}</Protected>;
@@ -34,6 +35,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               <Route path="/login" element={<Login />} />
               <Route path="/privacy" element={<Privacy />} />
               <Route path="/refund-policy" element={<RefundPolicy />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
 
               <Route path="/" element={<C><Overview /></C>} />
               <Route path="/services" element={<C><Services /></C>} />
